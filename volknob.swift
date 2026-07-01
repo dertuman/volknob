@@ -21,6 +21,14 @@ var gain: Float = 0.5
 var muted = false
 var preMuteGain: Float = 0.5
 let kSteps: Float = 16
+var balance: Float = 0   // −1 = full left … 0 = center … +1 = full right
+
+func saveBalance() { UserDefaults.standard.set(Double(balance), forKey: "balance") }
+func loadBalance() {
+    if UserDefaults.standard.object(forKey: "balance") != nil {
+        balance = max(-1, min(1, Float(UserDefaults.standard.double(forKey: "balance"))))
+    }
+}
 
 // ── 31-band graphic EQ (FxSound-style, ISO 1/3-octave) ───────────────────────
 let eqBandCount = 31
@@ -290,6 +298,9 @@ let ioProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, _ in
     let dst = outBL[1]          // chosen output device
     let bh  = outBL[0]          // BlackHole's own output — keep silent
     let g = muted ? 0 : gain
+    let bal = balance                                    // stereo balance: attenuate the far channel
+    let gL = g * (bal > 0 ? 1 - bal : 1)
+    let gR = g * (bal < 0 ? 1 + bal : 1)
     let ch = Int(src.mNumberChannels)
     let total = Int(src.mDataByteSize) / MemoryLayout<Float>.size
     if ch >= 1, total > 0,
@@ -297,7 +308,16 @@ let ioProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, _ in
        let d = dst.mData?.assumingMemoryBound(to: Float.self),
        Int(dst.mDataByteSize) >= Int(src.mDataByteSize) {
         if !eqEnabled && !enhanceEnabled {
-            for i in 0..<total { d[i] = s[i] * g }       // pure volume passthrough
+            if bal == 0 {
+                for i in 0..<total { d[i] = s[i] * g }   // pure volume passthrough
+            } else {                                     // volume + balance passthrough
+                let frames = total / ch
+                for n in 0..<frames {
+                    d[n*ch + 0] = s[n*ch + 0] * gL
+                    if ch >= 2 { d[n*ch + 1] = s[n*ch + 1] * gR }
+                    if ch > 2 { for c in 2..<ch { d[n*ch + c] = s[n*ch + c] * g } }
+                }
+            }
         } else {
             let frames = total / ch
             let cc = min(ch, 2)
@@ -335,8 +355,8 @@ let ioProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, _ in
                     }
                     L = softclip(L); if cc == 2 { R = softclip(R) }
                 }
-                d[n*ch + 0] = L * g
-                if cc == 2 { d[n*ch + 1] = R * g }
+                d[n*ch + 0] = L * gL
+                if cc == 2 { d[n*ch + 1] = R * gR }
                 if ch > 2 { for c in 2..<ch { d[n*ch + c] = s[n*ch + c] * g } }
             }
         }
@@ -498,6 +518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         loadEQ(); eqInit(); eqRebuildAll()   // restore saved EQ, build filter coefficients
         loadEnh(); enhInit(); updateEnhance()   // restore + build enhance effects
+        loadBalance()   // restore saved L/R balance
 
         // Funnel everything through us, then forward to the chosen device.
         setSystemDefaultOutput(uid: kBlackHoleUID)
@@ -585,6 +606,7 @@ final class EQWindowController: NSWindowController {
     private var valueLabels: [NSTextField] = []
     private var enhSliders: [NSSlider] = []
     private var enhLabels: [NSTextField] = []
+    private var balanceValueLabel: NSTextField!
     private let enhNames = ["Clarity", "Ambience", "Surround Sound", "Dynamic Boost", "Bass Boost"]
     private let eqLeft: CGFloat = 290
 
@@ -601,6 +623,11 @@ final class EQWindowController: NSWindowController {
 
     private func fmtDB(_ v: Float) -> String { let r = Int(v.rounded()); return r > 0 ? "+\(r)" : "\(r)" }
     private func enhVal(_ i: Int) -> Float { [enhClarity, enhAmbience, enhSurround, enhDynamic, enhBass][i] }
+    private func fmtBalance(_ v: Float) -> String {
+        let p = Int((abs(v) * 100).rounded())
+        if p == 0 { return "C" }
+        return v < 0 ? "L \(p)" : "R \(p)"
+    }
 
     private func buildUI() {
         guard let content = window?.contentView else { return }
@@ -628,6 +655,34 @@ final class EQWindowController: NSWindowController {
             vl.font = NSFont.systemFont(ofSize: 11); vl.textColor = .secondaryLabelColor
             content.addSubview(vl); enhLabels.append(vl)
         }
+
+        // ── balance (left / right) ───────────────────────────────────────────
+        let balName = NSTextField(labelWithString: "Balance")
+        balName.frame = NSRect(x: 20, y: 52, width: 180, height: 15)
+        balName.font = NSFont.systemFont(ofSize: 11)
+        content.addSubview(balName)
+
+        let balSlider = NSSlider(frame: NSRect(x: 20, y: 28, width: 210, height: 20))
+        balSlider.minValue = -1; balSlider.maxValue = 1; balSlider.doubleValue = Double(balance)
+        balSlider.numberOfTickMarks = 3            // ends + center marker
+        balSlider.target = self; balSlider.action = #selector(balanceChanged(_:))
+        content.addSubview(balSlider)
+
+        let lLbl = NSTextField(labelWithString: "L")
+        lLbl.frame = NSRect(x: 20, y: 10, width: 12, height: 13)
+        lLbl.font = NSFont.systemFont(ofSize: 9); lLbl.textColor = .secondaryLabelColor
+        content.addSubview(lLbl)
+        let rLbl = NSTextField(labelWithString: "R")
+        rLbl.frame = NSRect(x: 218, y: 10, width: 12, height: 13)
+        rLbl.alignment = .right
+        rLbl.font = NSFont.systemFont(ofSize: 9); rLbl.textColor = .secondaryLabelColor
+        content.addSubview(rLbl)
+
+        balanceValueLabel = NSTextField(labelWithString: fmtBalance(balance))
+        balanceValueLabel.frame = NSRect(x: 236, y: 30, width: 40, height: 15)
+        balanceValueLabel.font = NSFont.systemFont(ofSize: 11)
+        balanceValueLabel.textColor = .secondaryLabelColor
+        content.addSubview(balanceValueLabel)
 
         // divider
         let div = NSBox(frame: NSRect(x: eqLeft - 16, y: 20, width: 1, height: 340))
@@ -700,6 +755,15 @@ final class EQWindowController: NSWindowController {
         saveEnh()
     }
     @objc private func toggleEnh(_ b: NSButton) { enhanceEnabled = (b.state == .on); saveEnh() }
+
+    // Balance handler
+    @objc private func balanceChanged(_ s: NSSlider) {
+        var v = Float(s.doubleValue)
+        if abs(v) < 0.03 { v = 0; s.doubleValue = 0 }   // snap to center
+        balance = v
+        balanceValueLabel.stringValue = fmtBalance(v)
+        saveBalance()
+    }
 }
 
 let app = NSApplication.shared
