@@ -58,6 +58,39 @@ swiftc -O -o volknob volknob.swift \
 Requires the free [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) driver (`brew install blackhole-2ch`).
 </details>
 
+<details>
+<summary>Reloading after changing the code (important!)</summary>
+
+If VolKnob is already installed in `/Applications`, just run:
+
+```bash
+./reinstall.sh
+```
+
+Doing it by hand? The steps — and the one macOS gotcha — are:
+
+```bash
+# 1. compile (command above)
+# 2. swap the binary into the installed app and re-sign
+cp volknob /Applications/VolKnob.app/Contents/MacOS/volknob
+codesign --force --deep -s - /Applications/VolKnob.app
+# 3. clear the now-stale Accessibility grant   ← the step everyone misses
+tccutil reset Accessibility com.volknob.app
+# 4. restart the app
+launchctl kickstart -k "gui/$(id -u)/com.volknob.app"
+# 5. re-enable VolKnob in System Settings → Privacy & Security → Accessibility,
+#    then repeat step 4 so the volume-key tap installs under the fresh grant
+```
+
+**Why step 3 exists:** the app is ad-hoc signed, so every rebuild produces a new code
+signature. macOS ties the Accessibility permission (needed to intercept the volume keys)
+to that signature — after a rebuild the old grant is dead, and *re-toggling the existing
+checkbox does nothing* because the stored entry still points at the old signature. The
+entry must be deleted (`tccutil reset`) and granted fresh. Symptom of skipping it: the app
+runs and the menu-bar icon works, but the volume keys change BlackHole's own volume
+(macOS HUD appears) instead of VolKnob's.
+</details>
+
 ## How it works
 
 System audio is routed through **BlackHole** (a free virtual audio driver) into VolKnob, which applies **volume → EQ → enhance** in real time and forwards the result to your chosen output. Clock drift between devices is handled by a CoreAudio **aggregate device**, so it stays glitch-free.

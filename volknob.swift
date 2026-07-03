@@ -288,6 +288,26 @@ func setRate(_ dev: AudioObjectID, _ rate: Float64) {
     var a = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
     AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<Float64>.size), &r)
 }
+// Set a device's hardware output volume (master + L/R, whichever exist) and unmute it.
+// While VolKnob runs, the hardware must sit at 1.0 — our software gain is the only
+// volume control, and a stale hardware level (e.g. speakers last left at 31%) would
+// silently cap everything. BlackHole gets pinned too: if Accessibility ever lapses,
+// macOS routes the volume keys to BlackHole itself and attenuates audio upstream of us.
+func setHardwareVolume(uid: String, _ value: Float32) {
+    guard let dev = allDevices().first(where: { deviceUID($0) == uid }) else { return }
+    var v = value
+    for element in [AudioObjectPropertyElement(0), 1, 2] {
+        var a = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar, mScope: kAudioDevicePropertyScopeOutput, mElement: element)
+        if AudioObjectHasProperty(dev, &a) {
+            AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+        }
+    }
+    var unmuted: UInt32 = 0
+    var m = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+    if AudioObjectHasProperty(dev, &m) {
+        AudioObjectSetPropertyData(dev, &m, 0, nil, UInt32(MemoryLayout<UInt32>.size), &unmuted)
+    }
+}
 
 // ── the audio engine: rebuildable aggregate + IOProc ─────────────────────────
 let ioProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, _ in
@@ -373,6 +393,8 @@ final class Engine {
     func start(toUID uid: String) {
         stop()
         targetUID = uid
+        setHardwareVolume(uid: uid, 1.0)            // our gain is the only volume control
+        setHardwareVolume(uid: kBlackHoleUID, 1.0)  // undo any stray upstream attenuation
         let desc: [String: Any] = [
             kAudioAggregateDeviceNameKey as String: "VolKnob",
             kAudioAggregateDeviceUIDKey as String: kAggregateUID,
@@ -506,6 +528,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var eqWindow: EQWindowController?
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // Single-instance guard: a second copy fights over the aggregate device and can
+        // wedge coreaudiod (system-wide beachballs), and doubles every volume-key step.
+        // Keep the oldest instance; newer ones bow out quietly.
+        let me = NSRunningApplication.current
+        let older = NSRunningApplication.runningApplications(withBundleIdentifier: "com.volknob.app").filter {
+            $0.processIdentifier != me.processIdentifier &&
+            ($0.launchDate ?? .distantPast, $0.processIdentifier) < (me.launchDate ?? .distantPast, me.processIdentifier)
+        }
+        if !older.isEmpty { exit(0) }
+
         // Remember what audio was on, so we can hand it back on quit.
         originalSystemOutputUID = deviceUID(systemDefaultOutput())
         let firstTarget = (originalSystemOutputUID == kBlackHoleUID)
@@ -545,7 +577,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         engine.stop()
         // Hand audio back to the real device so the Mac isn't left silent.
         let restore = engine.targetUID.isEmpty ? originalSystemOutputUID : engine.targetUID
-        if !restore.isEmpty && restore != kBlackHoleUID { setSystemDefaultOutput(uid: restore) }
+        if !restore.isEmpty && restore != kBlackHoleUID {
+            // Hand the hardware back at our current loudness — we pinned it to 1.0 while
+            // running, and leaving it there would blast the user at full volume.
+            setHardwareVolume(uid: restore, muted ? 0 : gain)
+            setSystemDefaultOutput(uid: restore)
+        }
     }
 
     func refreshTitle() {
