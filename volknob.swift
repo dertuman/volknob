@@ -20,7 +20,7 @@ let kAggregateUID = "com.volknob.aggregate"
 var gain: Float = 0.5
 var muted = false
 var preMuteGain: Float = 0.5
-let kSteps: Float = 16
+let kSteps: Float = 32
 var balance: Float = 0   // −1 = full left … 0 = center … +1 = full right
 
 func saveBalance() { UserDefaults.standard.set(Double(balance), forKey: "balance") }

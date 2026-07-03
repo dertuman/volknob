@@ -11,7 +11,7 @@
 ![Swift](https://img.shields.io/badge/Swift-orange?logo=swift&logoColor=white)
 ![Price](https://img.shields.io/badge/price-%240-brightgreen)
 
-<img src="docs/hero.png" alt="VolKnob — 31-band equalizer and enhance" width="820">
+<img src="docs/volknob-overview.png" alt="VolKnob — menu-bar output switcher and the 31-band equalizer, running on macOS" width="820">
 
 </div>
 
@@ -24,7 +24,7 @@ Plug a **Scarlett 2i2** — or most USB audio interfaces and DACs — into your 
 **VolKnob fixes it for free** — and throws in a proper equalizer while it's at it.
 
 <div align="center">
-<img src="docs/menubar.png" alt="VolKnob in the menu bar — fixed-width volume readout" width="540">
+<img src="docs/volknob-menubar.png" alt="VolKnob menu-bar output switcher with the Scarlett 2i2 selected and a fixed-width volume readout" width="360">
 </div>
 
 ## What you get
@@ -37,7 +37,7 @@ Plug a **Scarlett 2i2** — or most USB audio interfaces and DACs — into your 
 - 🆓 **Free & open source** — SoundSource is $50. This is $0.
 
 <div align="center">
-<img src="docs/equalizer.png" alt="31-band equalizer and enhance sliders" width="820">
+<img src="docs/volknob-equalizer.png" alt="VolKnob's 31-band graphic equalizer and enhance sliders" width="820">
 </div>
 
 ## Install
