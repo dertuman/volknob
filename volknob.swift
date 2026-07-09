@@ -483,31 +483,36 @@ func installMediaKeyTap() -> Bool {
 // ════════════════════════════════════════════════════════════════════════════
 // Menu-bar status image — compact, fixed-size, sleek
 // ════════════════════════════════════════════════════════════════════════════
-let kBarW: CGFloat = 43   // fits big cone + "100" tightly; fixed → never changes width
-
-// Big speaker cone + big number, butted right together. The number sits at the VISIBLE cone
-// edge (the SF cone glyph has ~4pt of dead padding on its right, which is why it used to look
-// far). Fixed width → never resizes 0→100, never dropped. Template = auto light/dark tint.
+// Speaker cone + number butted tight, in an image exactly as wide as its ink —
+// "9" doesn't reserve blank width for "100", so the item hugs one menu-bar slot
+// (22pt at 1 digit, 30pt at 2, 38pt only while at 100) instead of a fixed 43.
+// Offsets are measured, not eyeballed: speaker.fill@13pt drawn at x=0 has ink
+// x∈[2,10] (the SF glyph carries dead padding), so the digits start at 11.5.
+// Monospaced digits → 41 and 47 render identical width; the item only ever
+// resizes at 9↔10↔100. Template = auto light/dark tint.
 func volumeStatusImage(pct: Int, gain: Double, muted: Bool) -> NSImage {
-    let W = kBarW, H: CGFloat = 18
+    let H: CGFloat = 18
+    let textX: CGFloat = 11.5   // right at the cone's visible ink edge
+    let attrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
+        .foregroundColor: NSColor.black,
+    ]
+    let text = "\(pct)" as NSString
+    let ts = text.size(withAttributes: attrs)
+    let W: CGFloat = muted ? 16 : ceil(textX + ts.width + 2)
+
     let out = NSImage(size: NSSize(width: W, height: H))
     out.lockFocus()
     NSColor.black.set()
 
     let symName = muted ? "speaker.slash.fill" : "speaker.fill"
-    if let s = NSImage(systemSymbolName: symName, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 16, weight: .regular)) {
+    if let s = NSImage(systemSymbolName: symName, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular)) {
         let sz = s.size
-        s.draw(in: NSRect(x: 2, y: (H - sz.height) / 2, width: sz.width, height: sz.height))
+        s.draw(in: NSRect(x: muted ? 1 : 0, y: (H - sz.height) / 2, width: sz.width, height: sz.height))
     }
 
     if !muted {
-        let text = "\(pct)" as NSString
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .bold),
-            .foregroundColor: NSColor.black,
-        ]
-        let ts = text.size(withAttributes: attrs)
-        text.draw(at: NSPoint(x: 16.7, y: (H - ts.height) / 2 - 0.5), withAttributes: attrs)  // tight to the cone's ink
+        text.draw(at: NSPoint(x: textX, y: (H - ts.height) / 2 - 0.5), withAttributes: attrs)
     }
 
     out.unlockFocus()
@@ -588,10 +593,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func refreshTitle() {
         guard let b = statusItem.button else { return }
         let pct = muted ? 0 : Int((gain * 100).rounded())
-        statusItem.length = kBarW              // fixed width → never jumps, never dropped
+        let img = volumeStatusImage(pct: pct, gain: Double(gain), muted: muted)
+        statusItem.length = img.size.width     // hug the content — one slot, no dead space
         b.imagePosition = .imageOnly
         b.title = ""
-        b.image = volumeStatusImage(pct: pct, gain: Double(gain), muted: muted)
+        b.image = img
         b.toolTip = muted ? "Muted" : "Volume \(pct)%"
     }
 
