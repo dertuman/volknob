@@ -23,6 +23,22 @@ var preMuteGain: Float = 0.5
 let kSteps: Float = 32
 var balance: Float = 0   // −1 = full left … 0 = center … +1 = full right
 
+// Per-device output ceiling: the fraction of full scale that "100%" on the knob means.
+// Some outputs (desktop speakers) are so loud that 50% on the knob is already painful,
+// while an interface like the Scarlett wants the whole range. Applied in software (the
+// hardware stays pinned at 1.0) so it works on devices that expose no hardware volume.
+var ceiling: Float = 1.0            // ceiling of the *current* target, read on the audio thread
+var ceilings: [String: Float] = [:] // uid → ceiling, persisted
+let kCeilingChoices: [Float] = [1.0, 0.85, 0.7, 0.5, 0.35, 0.25, 0.15, 0.10, 0.05, 0.02]
+
+func ceilingFor(_ uid: String) -> Float { ceilings[uid] ?? 1.0 }
+func saveCeilings() { UserDefaults.standard.set(ceilings.mapValues { Double($0) }, forKey: "ceilings") }
+func loadCeilings() {
+    if let d = UserDefaults.standard.dictionary(forKey: "ceilings") as? [String: Double] {
+        ceilings = d.mapValues { max(0.01, min(1, Float($0))) }
+    }
+}
+
 func saveBalance() { UserDefaults.standard.set(Double(balance), forKey: "balance") }
 func loadBalance() {
     if UserDefaults.standard.object(forKey: "balance") != nil {
@@ -317,7 +333,7 @@ let ioProc: AudioDeviceIOProc = { _, _, inData, _, outData, _, _ in
     let src = inBL[0]            // BlackHole loopback = the system audio
     let dst = outBL[1]          // chosen output device
     let bh  = outBL[0]          // BlackHole's own output — keep silent
-    let g = muted ? 0 : gain
+    let g = (muted ? 0 : gain) * ceiling
     let bal = balance                                    // stereo balance: attenuate the far channel
     let gL = g * (bal > 0 ? 1 - bal : 1)
     let gR = g * (bal < 0 ? 1 + bal : 1)
@@ -393,6 +409,7 @@ final class Engine {
     func start(toUID uid: String) {
         stop()
         targetUID = uid
+        ceiling = ceilingFor(uid)                   // this device's "100%" means this much
         setHardwareVolume(uid: uid, 1.0)            // our gain is the only volume control
         setHardwareVolume(uid: kBlackHoleUID, 1.0)  // undo any stray upstream attenuation
         let desc: [String: Any] = [
@@ -556,6 +573,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loadEQ(); eqInit(); eqRebuildAll()   // restore saved EQ, build filter coefficients
         loadEnh(); enhInit(); updateEnhance()   // restore + build enhance effects
         loadBalance()   // restore saved L/R balance
+        loadCeilings()  // restore saved per-device output ceilings
 
         // Funnel everything through us, then forward to the chosen device.
         setSystemDefaultOutput(uid: kBlackHoleUID)
@@ -585,7 +603,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !restore.isEmpty && restore != kBlackHoleUID {
             // Hand the hardware back at our current loudness — we pinned it to 1.0 while
             // running, and leaving it there would blast the user at full volume.
-            setHardwareVolume(uid: restore, muted ? 0 : gain)
+            setHardwareVolume(uid: restore, (muted ? 0 : gain) * ceilingFor(restore))
             setSystemDefaultOutput(uid: restore)
         }
     }
@@ -615,6 +633,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: muted ? "Volume: muted" : "Volume: \(Int((gain*100).rounded()))%",
                      action: nil, keyEquivalent: "").isEnabled = false
+        let capItem = NSMenuItem(title: "Max output: \(Int((ceiling*100).rounded()))%", action: nil, keyEquivalent: "")
+        let capMenu = NSMenu()
+        for c in kCeilingChoices {
+            let i = NSMenuItem(title: "\(Int((c*100).rounded()))%", action: #selector(pickCeiling(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = Double(c)
+            i.state = (abs(c - ceiling) < 0.001) ? .on : .off
+            capMenu.addItem(i)
+        }
+        capItem.submenu = capMenu
+        menu.addItem(capItem)
         menu.addItem(.separator())
         let eqItem = NSMenuItem(title: "Equalizer…", action: #selector(openEQ), keyEquivalent: "e")
         eqItem.target = self; menu.addItem(eqItem)
@@ -625,6 +654,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func pick(_ sender: NSMenuItem) {
         guard let uid = sender.representedObject as? String else { return }
         engine.start(toUID: uid)   // rebuild aggregate around the new target
+    }
+    @objc func pickCeiling(_ sender: NSMenuItem) {
+        guard let v = sender.representedObject as? Double, !engine.targetUID.isEmpty else { return }
+        ceilings[engine.targetUID] = Float(v)
+        ceiling = Float(v)          // takes effect on the next audio buffer, no engine rebuild
+        saveCeilings()
+        refreshTitle()
     }
     @objc func openEQ() {
         if eqWindow == nil { eqWindow = EQWindowController() }

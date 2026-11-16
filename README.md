@@ -33,6 +33,7 @@ Plug a **Scarlett 2i2** — or most USB audio interfaces and DACs — into your 
 - ✨ **Enhance suite** — **Bass**, **Clarity**, **Dynamic Boost**, **Ambience**, **Surround**. FxSound-style "everything just sounds better," in real time.
 - ⌨️ **Volume keys on any output** — even hardware-only interfaces with no software volume. The keys control *your* device, not just the built-in speakers.
 - 🔀 **Output switcher** — pick your speakers / interface / headphones from the menu bar in one click.
+- **Max output per device**: cap what "100%" means for each output (2% to 100%), so loud desktop speakers get the full range of the keys without blasting you.
 - 🪶 **Sleek & native** — a tiny menu-bar app. Auto-starts at login, restores your audio cleanly, sane defaults.
 - 🆓 **Free & open source** — SoundSource is $50. This is $0.
 
