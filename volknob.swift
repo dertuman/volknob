@@ -9,6 +9,12 @@ import ApplicationServices
 // Topology:  all system audio → BlackHole → [this app: ×gain] → chosen device
 // The volume keys are intercepted and drive `gain`, so they work on devices
 // (like the Scarlett) that expose no hardware volume to macOS.
+//
+// Bluetooth is the exception:  all system audio → headphones, nothing in between.
+// Apps sync video to the latency their output device reports. BlackHole reports
+// none, so a routed Bluetooth target plays 150-300 ms behind the picture and the
+// player cannot correct it. Headphones have a real hardware volume anyway, so the
+// keys drive that instead and the EQ is skipped.
 // ════════════════════════════════════════════════════════════════════════════
 
 setbuf(stdout, nil)
@@ -36,6 +42,16 @@ func saveCeilings() { UserDefaults.standard.set(ceilings.mapValues { Double($0) 
 func loadCeilings() {
     if let d = UserDefaults.standard.dictionary(forKey: "ceilings") as? [String: Double] {
         ceilings = d.mapValues { max(0.01, min(1, Float($0))) }
+    }
+}
+
+// Bluetooth outputs bypass BlackHole and become the system output themselves (see the
+// header). Off = route them like any other device: EQ works, video runs ahead of audio.
+var directBluetooth = true
+func saveDirectBluetooth() { UserDefaults.standard.set(directBluetooth, forKey: "directBluetooth") }
+func loadDirectBluetooth() {
+    if UserDefaults.standard.object(forKey: "directBluetooth") != nil {
+        directBluetooth = UserDefaults.standard.bool(forKey: "directBluetooth")
     }
 }
 
@@ -309,6 +325,13 @@ func setRate(_ dev: AudioObjectID, _ rate: Float64) {
 // volume control, and a stale hardware level (e.g. speakers last left at 31%) would
 // silently cap everything. BlackHole gets pinned too: if Accessibility ever lapses,
 // macOS routes the volume keys to BlackHole itself and attenuates audio upstream of us.
+func isBluetooth(uid: String) -> Bool {
+    guard let dev = allDevices().first(where: { deviceUID($0) == uid }) else { return false }
+    var t = UInt32(0); var sz = UInt32(MemoryLayout<UInt32>.size)
+    var a = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    AudioObjectGetPropertyData(dev, &a, 0, nil, &sz, &t)
+    return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
+}
 func setHardwareVolume(uid: String, _ value: Float32) {
     guard let dev = allDevices().first(where: { deviceUID($0) == uid }) else { return }
     var v = value
@@ -405,12 +428,23 @@ final class Engine {
     private var agg: AudioObjectID = 0
     private var procID: AudioDeviceIOProcID?
     private(set) var targetUID: String = ""
+    private(set) var direct = false          // target is the system output itself, no aggregate
+    private(set) var lastRoutedUID = ""      // where to go back to when the headphones leave
 
     func start(toUID uid: String) {
         stop()
         targetUID = uid
         ceiling = ceilingFor(uid)                   // this device's "100%" means this much
-        setHardwareVolume(uid: uid, 1.0)            // our gain is the only volume control
+        if directBluetooth && isBluetooth(uid: uid) {
+            direct = true
+            syncDirectVolume()                      // set the level before any audio reaches it
+            setSystemDefaultOutput(uid: uid)
+            return
+        }
+        lastRoutedUID = uid
+        // Funnel everything through us first: the target is about to be pinned at full
+        // hardware volume, and nothing may still be playing into it directly by then.
+        setSystemDefaultOutput(uid: kBlackHoleUID)
         setHardwareVolume(uid: kBlackHoleUID, 1.0)  // undo any stray upstream attenuation
         let desc: [String: Any] = [
             kAudioAggregateDeviceNameKey as String: "VolKnob",
@@ -428,6 +462,7 @@ final class Engine {
         }
         setRate(agg, 48000)
         eqResetState()   // clear filter memory so switching outputs doesn't pop
+        setHardwareVolume(uid: uid, 1.0)            // our gain is the only volume control
         AudioDeviceCreateIOProcID(agg, ioProc, nil, &procID)
         AudioDeviceStart(agg, procID)
     }
@@ -436,8 +471,16 @@ final class Engine {
             AudioDeviceStop(agg, procID)
             if let p = procID { AudioDeviceDestroyIOProcID(agg, p) }
             AudioHardwareDestroyAggregateDevice(agg)
+            // Un-pin the device we are leaving. macOS may fall back to it on its own later
+            // (headphones switched off), and it must not be sitting at full hardware volume.
+            setHardwareVolume(uid: targetUID, (muted ? 0 : gain) * ceilingFor(targetUID))
         }
-        agg = 0; procID = nil
+        agg = 0; procID = nil; direct = false
+    }
+    // Direct mode has no software gain stage: the knob drives the hardware volume.
+    func syncDirectVolume() {
+        guard direct else { return }
+        setHardwareVolume(uid: targetUID, (muted ? 0 : gain) * ceiling)
     }
 }
 
@@ -461,7 +504,7 @@ func applyVolumeKey(_ keyCode: Int32) {
         else { muted = true; preMuteGain = gain }
     default: return
     }
-    DispatchQueue.main.async { appDelegate?.refreshTitle() }
+    DispatchQueue.main.async { appDelegate?.engine.syncDirectVolume(); appDelegate?.refreshTitle() }
 }
 
 let eventTapCallback: CGEventTapCallBack = { _, type, event, _ in
@@ -574,10 +617,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loadEnh(); enhInit(); updateEnhance()   // restore + build enhance effects
         loadBalance()   // restore saved L/R balance
         loadCeilings()  // restore saved per-device output ceilings
+        loadDirectBluetooth()
 
-        // Funnel everything through us, then forward to the chosen device.
-        setSystemDefaultOutput(uid: kBlackHoleUID)
+        // Funnel everything through us and forward to the chosen device (or, for
+        // Bluetooth, hand it the system output directly).
         engine.start(toUID: firstTarget)
+        watchOutputChanges()
 
         if !installMediaKeyTap() {
             promptAccessibility()
@@ -595,6 +640,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) { cleanupAndRestore() }
+
+    // ── following the headphones ─────────────────────────────────────────────
+    // macOS moves the system output on its own when Bluetooth headphones connect or
+    // drop. Our own switches fire these listeners too, so `reconcile` only compares
+    // settled state against what the engine expects and is a no-op when they agree.
+    var reconcileWork: DispatchWorkItem?
+
+    func watchOutputChanges() {
+        for sel in [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices] {
+            var a = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &a, DispatchQueue.main) { [weak self] _, _ in
+                guard let self = self else { return }
+                self.reconcileWork?.cancel()      // changes arrive in bursts: wait for quiet
+                let w = DispatchWorkItem { [weak self] in self?.reconcile() }
+                self.reconcileWork = w
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: w)
+            }
+        }
+    }
+
+    func reconcile() {
+        let cur = deviceUID(systemDefaultOutput())
+        let present = Set(realOutputDevices().map { $0.uid })
+        if engine.direct {
+            if cur == engine.targetUID { return }
+            if !present.contains(engine.targetUID) {
+                // Headphones gone. Go back to what was playing before them, whatever
+                // macOS picked in the meantime.
+                let back = [engine.lastRoutedUID, cur, "BuiltInSpeakerDevice"].first { present.contains($0) }
+                    ?? realOutputDevices().first?.uid
+                if let back = back { engine.start(toUID: back) }
+            } else if present.contains(cur) {
+                engine.start(toUID: cur)                          // output moved elsewhere by hand
+            } else {
+                setSystemDefaultOutput(uid: engine.targetUID)     // parked on BlackHole: take it back
+            }
+        } else if directBluetooth && present.contains(cur) && isBluetooth(uid: cur) {
+            engine.start(toUID: cur)                              // headphones connected
+        } else {
+            return
+        }
+        refreshTitle()
+    }
 
     func cleanupAndRestore() {
         engine.stop()
@@ -644,6 +732,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         capItem.submenu = capMenu
         menu.addItem(capItem)
+        let btItem = NSMenuItem(title: "Direct Bluetooth (no delay, no EQ)", action: #selector(toggleDirectBluetooth), keyEquivalent: "")
+        btItem.target = self
+        btItem.state = directBluetooth ? .on : .off
+        menu.addItem(btItem)
         menu.addItem(.separator())
         let eqItem = NSMenuItem(title: "Equalizer…", action: #selector(openEQ), keyEquivalent: "e")
         eqItem.target = self; menu.addItem(eqItem)
@@ -659,8 +751,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let v = sender.representedObject as? Double, !engine.targetUID.isEmpty else { return }
         ceilings[engine.targetUID] = Float(v)
         ceiling = Float(v)          // takes effect on the next audio buffer, no engine rebuild
+        engine.syncDirectVolume()
         saveCeilings()
         refreshTitle()
+    }
+    @objc func toggleDirectBluetooth() {
+        directBluetooth.toggle()
+        saveDirectBluetooth()
+        if isBluetooth(uid: engine.targetUID) { engine.start(toUID: engine.targetUID) }   // re-route now
     }
     @objc func openEQ() {
         if eqWindow == nil { eqWindow = EQWindowController() }
@@ -843,6 +941,17 @@ final class EQWindowController: NSWindowController {
         balanceValueLabel.stringValue = fmtBalance(v)
         saveBalance()
     }
+}
+
+// `volknob --devices`: list the outputs and how each would be driven, then exit.
+if CommandLine.arguments.contains("--devices") {
+    loadDirectBluetooth()
+    let cur = deviceUID(systemDefaultOutput())
+    for d in realOutputDevices() {
+        let mode = directBluetooth && isBluetooth(uid: d.uid) ? "direct" : "routed"
+        print("\(mode)  \(d.name)  [\(d.uid)]\(d.uid == cur ? "  (system output)" : "")")
+    }
+    exit(0)
 }
 
 let app = NSApplication.shared

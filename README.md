@@ -102,6 +102,14 @@ all system sound → BlackHole → VolKnob [volume · 31-band EQ · enhance] →
                     volume keys / mouse wheel
 ```
 
+### Bluetooth headphones
+
+Bluetooth outputs skip that chain and become the system output directly. Video players delay the picture by the latency their output device reports. BlackHole reports none, so a routed Bluetooth target plays 150-300 ms behind the picture and nothing can correct it. Played directly, YouTube and friends see the real headphone latency and stay in sync.
+
+In this mode the volume keys drive the headphones' own hardware volume (scaled by **Max output**) and the EQ is bypassed. VolKnob follows the headphones as they connect and disconnect, and returns to the previous output when they leave. To get the EQ back at the cost of sync, untick **Direct Bluetooth** in the menu.
+
+`volknob --devices` lists every output and whether it is driven `direct` or `routed`.
+
 ## Tested with
 
 - MacBook (Apple Silicon) + **Focusrite Scarlett 2i2 USB**
